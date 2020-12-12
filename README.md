@@ -1,0 +1,2 @@
+# Aurum db
+Wrapper around leveldb that makes it possible to read and write the DB using streams. Requires Aurum.js and harmonizes well with aurum-server. Makes it possible to open push streams from the database through the webserver all the way into the DOM using the stack of aurum-db aurum-server and aurum.js

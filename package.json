@@ -1,0 +1,29 @@
+{
+    "name": "aurum-db",
+    "version": "0.0.1",
+    "description": "Wrapper around leveldb that makes it possible to read and write the DB using streams",
+    "main": "prebuilt/cjs/aurum-db.js",
+    "typings": "prebuilt/esnext/aurum-db.d.ts",
+    "dependencies": {
+        "@types/node": "^14.14.12",
+        "aurumjs": "^0.5.49",
+        "level": "^6.0.1"
+    },
+    "scripts": {
+        "build": "tsc",
+        "watch": "tsc -w",
+        "prepublish": "npm run deploy",
+        "deploy": "npm run build && tsc -p tsconfig.cjs.json"
+    },
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/CyberPhoenix90/aurum-server.git"
+    },
+    "keywords": [],
+    "author": "",
+    "license": "ISC",
+    "bugs": {
+        "url": "https://github.com/CyberPhoenix90/aurum-server/issues"
+    },
+    "homepage": "https://github.com/CyberPhoenix90/aurum-server#readme"
+}
