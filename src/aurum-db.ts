@@ -1,143 +1,407 @@
-import { ArrayDataSource, DataSource } from "aurumjs";
-import * as level from "level";
+import { AbstractIterator, AbstractIteratorOptions } from 'abstract-leveldown';
+import { CancellationToken, DataSource, MapDataSource } from 'aurumjs';
+import * as level from 'level';
+import { LevelUp } from 'levelup';
+import * as sub from 'subleveldown';
+import { BinaryEncodings, Encodings, JsonEncoding, TextEncodings } from './leveldb';
 
-export type TextEncodings =
-    | "utf8"
-    | "hex"
-    | "ascii"
-    | "base64"
-    | "ucs2"
-    | "utf16le"
-    | "utf-16le";
-
-export type JsonEncoding = "json";
-
-export type BinaryEncodings = "binary";
-
-export type Encodings = TextEncodings | BinaryEncodings | JsonEncoding;
-
-export async function initializeDatabase(config: {
-    path: string;
+type AurumDBIntegrityConfig = {
     autoDeleteOnSetUndefined?: boolean;
-}): Promise<AurumDB> {
-    const dsObservers: Map<string, DataSource<any>[]> = new Map();
-    const adsObservers: Map<string, ArrayDataSource<any>[]> = new Map();
+};
+
+interface AurumDBConfig {
+    path: string;
+    integrity?: AurumDBIntegrityConfig;
+}
+
+export async function initializeDatabase(config: AurumDBConfig): Promise<AurumDB> {
     const db = await level(config.path);
 
-    function publish(key: string, value: any) {
-        if (dsObservers.has(key)) {
-            for (const ds of dsObservers.get(key)) {
-                ds.update(value);
+    return new AurumDB(
+        db,
+        config.integrity ?? {
+            autoDeleteOnSetUndefined: false,
+        }
+    );
+}
+
+function makeSubDbId(subDbName: string, id: string): string {
+    return `!${subDbName}!${id}`;
+}
+
+const META_KEY = '!!meta!!';
+
+export class AurumDB {
+    protected config: AurumDBIntegrityConfig;
+    protected db: LevelUp;
+
+    constructor(db: LevelUp, config: AurumDBIntegrityConfig) {
+        this.config = config;
+        this.db = db;
+    }
+
+    public iterator(options?: AbstractIteratorOptions): AbstractIterator<string, any> {
+        return this.db.iterator(options);
+    }
+
+    public clear(): Promise<void> {
+        return this.db.clear();
+    }
+
+    public async deleteIndex(name: string): Promise<void> {
+        const index = await this.getIndex(name);
+        await index.db.clear();
+    }
+
+    public async deleteOrderedCollection(name: string): Promise<void> {
+        return ((await this.getOrderedCollection(name)) as any).db.clear();
+    }
+
+    public async deletedLinkedCollection(name: string): Promise<void> {
+        return ((await this.getLinkedCollection(name)) as any).db.clear();
+    }
+
+    public hasIndex(name: string): Promise<boolean> {
+        return this.has(makeSubDbId(name + 'index', META_KEY));
+    }
+
+    public hasOrderedCollection(name: string): Promise<boolean> {
+        return this.has(makeSubDbId(name + 'ordered', META_KEY));
+    }
+
+    public hasLinkedCollection(name: string): Promise<boolean> {
+        return this.has(makeSubDbId(name + 'linked', META_KEY));
+    }
+
+    public async has(key: string): Promise<boolean> {
+        try {
+            await this.db.get(key);
+        } catch (e) {
+            if (e.message.includes('Key not found in database')) {
+                return false;
+            } else {
+                throw e;
             }
         }
+        return true;
+    }
 
-        if (adsObservers.has(key)) {
-            for (const ads of adsObservers.get(key)) {
-                if (value) {
-                    ads.merge(value);
-                } else {
-                    ads.clear();
-                }
-            }
+    public async getIndex(name: string): Promise<AurumDBIndex> {
+        if (await this.hasIndex(name)) {
+            return new AurumDBIndex(sub(this.db, name + 'index'), this.config);
+        } else {
+            throw new Error(`Index ${name} does not exist`);
         }
     }
 
-    const self: AurumDB = {
-        async observeKeyAsArray<T>(key: string): Promise<ArrayDataSource<T>> {
-            const ads = new ArrayDataSource<T>(
-                (await self.has(key))
-                    ? await self.get<T[]>(key, "json")
-                    : undefined
-            );
-            if (!adsObservers.has(key)) {
-                adsObservers.set(key, []);
+    public async createOrGetIndex(name: string): Promise<AurumDBIndex> {
+        if (await this.hasIndex(name)) {
+            return new AurumDBIndex(sub(this.db, name + 'index'), this.config);
+        } else {
+            return this.createIndex(name);
+        }
+    }
+
+    public async getOrderedCollection<T>(name: string): Promise<AurumDBOrderedCollection<T>> {
+        if (await this.hasOrderedCollection(name)) {
+            return new AurumDBOrderedCollection<T>(sub(this.db, name + 'ordered'));
+        } else {
+            throw new Error(`Ordered collection ${name} does not exist`);
+        }
+    }
+
+    public async createOrGetOrderedCollection<T>(name: string): Promise<AurumDBOrderedCollection<T>> {
+        if (await this.hasOrderedCollection(name)) {
+            return new AurumDBOrderedCollection<T>(sub(this.db, name + 'ordered'));
+        } else {
+            return this.createOrderedCollection(name);
+        }
+    }
+
+    public async getLinkedCollection<T>(name: string): Promise<AurumDBLinkedCollection<T>> {
+        if (await this.hasLinkedCollection(name)) {
+            return new AurumDBLinkedCollection<T>(sub(this.db, name + 'linked'));
+        } else {
+            throw new Error(`Linked collection ${name} does not exist`);
+        }
+    }
+
+    public async createOrGetLinkedCollection<T>(name: string): Promise<AurumDBLinkedCollection<T>> {
+        if (await this.hasLinkedCollection(name)) {
+            return new AurumDBLinkedCollection<T>(sub(this.db, name + 'linked'));
+        } else {
+            return this.createLinkedCollection(name);
+        }
+    }
+
+    /**
+     * An index is a basically a hashmap, each item is referred by key, however you can also iterate over the entire set of key values
+     * Suitable use cases: Unordered lists, Hash maps, Nested Hash maps
+     * Unsuitable use cases: Stacks, Ordered lists, Queues
+     */
+    public async createIndex(name: string): Promise<AurumDBIndex> {
+        if (await this.hasIndex(name)) {
+            throw new Error(`Index ${name} already exists`);
+        }
+        name += 'index';
+        await this.db.put(makeSubDbId(name, META_KEY), new Date().toJSON(), {
+            valueEncoding: 'json',
+        });
+        return new AurumDBIndex(sub(this.db, name), this.config);
+    }
+    /**
+     * An ordered collection is basically an array, all items have a numerical index. Delete and Insert of items that are not the last one in the array can be very expensive. Write operations lock the entire collection due to lack of thread safetly.
+     * Suitable use cases: Stacks, Append only list, Random access lists
+     * Unsuitable: Queues, Hash Maps
+     */
+    public async createOrderedCollection<T>(name: string): Promise<AurumDBOrderedCollection<T>> {
+        if (await this.hasOrderedCollection(name)) {
+            throw new Error(`Ordered Collection ${name} already exists`);
+        }
+        name += 'ordered';
+        await this.db.put(makeSubDbId(name, META_KEY), 0, {
+            valueEncoding: 'json',
+        });
+        return new AurumDBOrderedCollection<T>(sub(this.db, name));
+    }
+
+    /**
+     * A linked collection is basically a linked list. Delete and Insert of items is relatively cheap. Write operations lock only part of the collection. Iteration is fine, but random access is expensive
+     * Suitable use cases: Queues, Stacks, Append only list (but ordered collection is faster for that  )
+     * Unsuitable: Random access lists, Hash Maps
+     */
+    public async createLinkedCollection<T>(name: string): Promise<AurumDBLinkedCollection<T>> {
+        if (await this.hasLinkedCollection(name)) {
+            throw new Error(`Linked Collection ${name} already exists`);
+        }
+        name += 'linked';
+        await this.db.put(makeSubDbId(name, META_KEY), 0, {
+            valueEncoding: 'json',
+        });
+        return new AurumDBLinkedCollection<T>(sub(this.db, name));
+    }
+}
+
+export class AurumDBIndex extends AurumDB {
+    private totalObservers: MapDataSource<string, any>[];
+    private keyObservers: Map<string, DataSource<any>[]>;
+
+    constructor(db: LevelUp, config: AurumDBIntegrityConfig) {
+        super(db, config);
+        this.totalObservers = [];
+        this.keyObservers = new Map();
+        this.db.on('put', (k, v) => {
+            for (const mds of this.totalObservers) {
+                mds.set(k, v);
             }
-            adsObservers.get(key).push(ads);
-
-            return ads;
-        },
-        async observeKey<T>(
-            key: string,
-            encoding: Encodings = "utf8"
-        ): Promise<DataSource<T>> {
-            const ds = new DataSource<T>(
-                (await self.has(key))
-                    ? await self.get<T>(key, encoding)
-                    : undefined
-            );
-            if (!dsObservers.has(key)) {
-                dsObservers.set(key, []);
-            }
-            dsObservers.get(key).push(ds);
-
-            return ds;
-        },
-
-        async has(key: string): Promise<boolean> {
-            try {
-                await db.get(key);
-            } catch (e) {
-                if (e.message.includes("Key not found in database")) {
-                    return false;
-                } else {
-                    throw e;
+            if (this.keyObservers.has(k)) {
+                for (const ds of this.keyObservers.get(k)) {
+                    ds.update(v);
                 }
             }
-            return true;
-        },
-        get<T>(key: string, encoding: Encodings = "utf8"): Promise<T> {
-            return db.get(key, {
-                valueEncoding: encoding,
-            });
-        },
-        set(
-            key: string,
-            value: string | Buffer,
-            encoding: Encodings = "utf8"
-        ): Promise<void> {
-            if (
-                config.autoDeleteOnSetUndefined &&
-                (value === undefined || value === null)
-            ) {
-                publish(key, undefined);
-                return db.del(key);
-            } else {
-                publish(key, value);
-                return db.put(key, value, { valueEncoding: encoding });
+        });
+        this.db.on('del', (k) => {
+            for (const mds of this.totalObservers) {
+                mds.delete(k);
             }
-        },
-        del(key: string): Promise<void> {
-            publish(key, undefined);
-            return db.del(key);
-        },
-        clear(): Promise<void> {
-            for (const dsObserver of dsObservers.values()) {
-                for (const ds of dsObserver) {
+            if (this.keyObservers.has(k)) {
+                for (const ds of this.keyObservers.get(k)) {
                     ds.update(undefined);
                 }
             }
+        });
+    }
 
-            for (const adsObserver of adsObservers.values()) {
-                for (const ads of adsObserver) {
-                    ads.clear();
-                }
+    /**
+     * Caution: While this is very useful for reactivity this has a high cost, it has to read the entire index to get started, if your index is huge this may even make your application go out of memory, to be used only with moderate sized indexes.
+     * Suggested max size: 5k entries
+     */
+    public async observeEntireIndex<T>(cancellationToken: CancellationToken, valueEncoding?: Encodings): Promise<MapDataSource<string, T>> {
+        const iter = this.iterator({
+            values: false,
+        });
+        const result = new MapDataSource<string, T>();
+        this.totalObservers.push(result);
+        cancellationToken.addCancelable(() => {
+            const index = this.totalObservers.indexOf(result);
+            if (index !== -1) {
+                this.totalObservers.splice(index, 1);
             }
-            return db.clear();
-        },
-    };
-    return self;
+        });
+        let that = this;
+        return new Promise<MapDataSource<string, T>>((resolve, reject) => {
+            iter.next(async function cb(err, key) {
+                if (err) {
+                    iter.end(() => void 0);
+                    reject(err);
+                }
+                if (key === undefined) {
+                    iter.end(() => void 0);
+                    resolve(result);
+                } else if (!key.includes('!')) {
+                    result.set(key, await that.get(key, valueEncoding));
+                    iter.next(cb);
+                } else {
+                    iter.next(cb);
+                }
+            });
+        });
+    }
+
+    public async observeKey<T>(key: string, cancellationToken: CancellationToken, valueEncoding?: Encodings): Promise<DataSource<T>> {
+        const ds = new DataSource<T>();
+
+        if (await this.has(key)) {
+            ds.update(await this.get(key, valueEncoding));
+        }
+
+        if (!this.keyObservers.has(key)) {
+            this.keyObservers.set(key, []);
+        }
+        this.keyObservers.get(key).push(ds);
+        cancellationToken.addCancelable(() => {
+            const dss = this.keyObservers.get(key);
+            const index = dss.indexOf(ds);
+            if (index !== -1) {
+                dss.splice(index, 1);
+            }
+        });
+
+        return ds;
+    }
+
+    public get(key: string, encoding: JsonEncoding): Promise<any>;
+    public get(key: string, encoding: BinaryEncodings): Promise<Buffer>;
+    public get(key: string, encoding: TextEncodings): Promise<string>;
+    public get(key: string, encoding?: Encodings): Promise<any>;
+    public get(key: string, encoding?: Encodings): Promise<any> {
+        return this.db.get(key, {
+            valueEncoding: encoding,
+        });
+    }
+
+    public set(key: string, value: any, encoding: JsonEncoding): Promise<void>;
+    public set(key: string, value: Buffer, encoding: BinaryEncodings): Promise<void>;
+    public set(key: string, value: string, encoding: TextEncodings): Promise<void>;
+    public set(key: string, value: any, encoding?: Encodings): Promise<void>;
+    public set(key: string, value: any, encoding?: Encodings): Promise<void> {
+        if (this.config.autoDeleteOnSetUndefined && (value === undefined || value === null)) {
+            return this.db.del(key);
+        } else {
+            return this.db.put(key, value, { valueEncoding: encoding });
+        }
+    }
+    public delete(key: string): Promise<void> {
+        return this.db.del(key);
+    }
+    public async clear(): Promise<void> {
+        const val = await this.get(META_KEY, 'json');
+        await this.db.clear();
+        await this.set(META_KEY, val, 'json');
+    }
 }
 
-export interface AurumDB {
-    observeKeyAsArray<T>(key: string): Promise<ArrayDataSource<T>>;
-    observeKey<T>(key: string, encoding?: Encodings): Promise<DataSource<T>>;
-    get(key: string, encoding: BinaryEncodings): Promise<Buffer>;
-    get(key: string, encoding: TextEncodings): Promise<string>;
-    get<T>(key: string, encoding?: Encodings): Promise<T>;
-    has(key: string): Promise<boolean>;
-    set(key: string, value: Buffer, encoding: BinaryEncodings): Promise<void>;
-    set(key: string, value: string, encoding: TextEncodings): Promise<void>;
-    set(key: string, value: any, encoding?: Encodings): Promise<void>;
-    del(key: string): Promise<void>;
-    clear(): Promise<void>;
+export class AurumDBLinkedCollection<T> {
+    protected db: LevelUp;
+
+    constructor(db: LevelUp) {
+        this.db = db;
+    }
+
+    public clear(): Promise<void> {
+        return this.db.clear();
+    }
+}
+
+export class AurumDBOrderedCollection<T> {
+    private db: any;
+
+    constructor(db: LevelUp) {
+        this.db = db;
+    }
+
+    public async length(): Promise<number> {
+        return await this.db.get(META_KEY, { valueEncoding: 'json' });
+    }
+
+    public async get(index: number): Promise<T> {
+        const len = await this.length();
+        if (index > len) {
+            throw new Error('cannot read outside of bounds of array');
+        }
+        return this.db.get(index, { valueEncoding: 'json' });
+    }
+
+    public async set(index: number, item: T): Promise<void> {
+        const len = await this.length();
+        if (index > len) {
+            throw new Error('cannot write outside of bounds of array');
+        }
+
+        return this.db.put(index, item, {
+            valueEncoding: 'json',
+        });
+    }
+
+    public async push(...items: T[]): Promise<void> {
+        const len = await this.length();
+        for (let i = 0; i < items.length; i++) {
+            await this.db.put(`${len + i}`, items[i], {
+                valueEncoding: 'json',
+            });
+        }
+        await this.db.put(META_KEY, len + items.length, {
+            valueEncoding: 'json',
+        });
+    }
+
+    public async slice(startIndex: number, endIndex: number): Promise<T[]> {
+        const len = await this.length();
+        if (startIndex > len || startIndex < 0 || endIndex > len || endIndex < 0) {
+            throw new Error('cannot write outside of bounds of array');
+        }
+        const items = [];
+        for (let i = startIndex; i < endIndex; i++) {
+            items.push(await this.db.get(i, { valueEncoding: 'json' }));
+        }
+        return items;
+    }
+
+    public async pop(): Promise<T> {
+        const len = await this.length();
+        await this.db.put(META_KEY, len - 1, {
+            valueEncoding: 'json',
+        });
+        const v = await this.db.get(len - 1, {
+            valueEncoding: 'json',
+        });
+        await this.db.del(len - 1);
+        return v;
+    }
+
+    async clear(): Promise<void> {
+        await this.db.clear();
+        this.db.put(META_KEY, 0, { valueEncoding: 'json' });
+    }
+
+    async toArray(): Promise<T[]> {
+        const items = [];
+        const len = await this.length();
+        for (let i = 0; i < len; i++) {
+            items.push(await this.db.get(i, { valueEncoding: 'json' }));
+        }
+
+        return items;
+    }
+    async forEach(cb: (item: T, index: number) => void): Promise<void> {
+        const len = await this.length();
+        for (let i = 0; i < len; i++) {
+            cb(
+                await this.db.get(i, {
+                    valueEncoding: 'json',
+                }),
+                i
+            );
+        }
+    }
 }
