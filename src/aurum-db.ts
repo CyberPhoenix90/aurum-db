@@ -1,5 +1,5 @@
-import { AbstractIterator, AbstractIteratorOptions } from 'abstract-leveldown';
-import { CancellationToken, DataSource, MapDataSource } from 'aurumjs';
+import { AbstractIterator, AbstractIteratorOptions, AbstractBatch } from 'abstract-leveldown';
+import { ArrayDataSource, CancellationToken, DataSource, MapDataSource } from 'aurumjs';
 import * as level from 'level';
 import { LevelUp } from 'levelup';
 import * as sub from 'subleveldown';
@@ -190,26 +190,63 @@ export class AurumDBIndex extends AurumDB {
         super(db, config);
         this.totalObservers = [];
         this.keyObservers = new Map();
-        this.db.on('put', (k, v) => {
-            for (const mds of this.totalObservers) {
-                mds.set(k, v);
-            }
-            if (this.keyObservers.has(k)) {
-                for (const ds of this.keyObservers.get(k)) {
-                    ds.update(v);
+        this.db.on('batch', (ops: AbstractBatch[]) => {
+            for (const op of ops) {
+                switch (op.type) {
+                    case 'put':
+                        this.onKeyChange(op.key, op.value);
+                        break;
+                    case 'del':
+                        this.onKeyChange(op.key, undefined);
+                        break;
+                    //@ts-ignore
+                    case 'clear':
+                        this.onClear();
+                        break;
+                    default:
+                        throw new Error('unhandled operation');
                 }
             }
+        });
+        this.db.on('clear', () => {
+            this.onClear();
+        });
+
+        this.db.on('put', (k, v) => {
+            this.onKeyChange(k, v);
         });
         this.db.on('del', (k) => {
-            for (const mds of this.totalObservers) {
+            this.onKeyChange(k, undefined);
+        });
+    }
+
+    private onClear(): void {
+        for (const mds of this.totalObservers) {
+            for (const k of mds.keys()) {
                 mds.delete(k);
             }
-            if (this.keyObservers.has(k)) {
-                for (const ds of this.keyObservers.get(k)) {
-                    ds.update(undefined);
-                }
+        }
+
+        for (const dss of this.keyObservers.values()) {
+            for (const ds of dss) {
+                ds.update(undefined);
             }
-        });
+        }
+    }
+
+    private onKeyChange(k: any, v: any): void {
+        for (const mds of this.totalObservers) {
+            if (v === undefined) {
+                mds.delete(k);
+            } else {
+                mds.set(k, v);
+            }
+        }
+        if (this.keyObservers.has(k)) {
+            for (const ds of this.keyObservers.get(k)) {
+                ds.update(v);
+            }
+        }
     }
 
     /**
@@ -314,17 +351,119 @@ export class AurumDBLinkedCollection<T> {
 }
 
 export class AurumDBOrderedCollection<T> {
-    private db: any;
+    private totalObservers: ArrayDataSource<T>[];
+    private keyObservers: Map<string, DataSource<any>[]>;
+    private db: LevelUp;
+    private lock: Promise<any>;
 
     constructor(db: LevelUp) {
         this.db = db;
+        this.totalObservers = [];
+        this.keyObservers = new Map();
+        this.db.on('batch', (ops: AbstractBatch[]) => {
+            for (const op of ops) {
+                switch (op.type) {
+                    case 'put':
+                        this.onKeyChange(op.key, op.value);
+                        break;
+                    case 'del':
+                        this.onKeyChange(op.key, undefined);
+                        break;
+                    //@ts-ignore
+                    case 'clear':
+                        this.onClear();
+                        break;
+                    default:
+                        throw new Error('unhandled operation');
+                }
+            }
+        });
+        this.db.on('clear', () => {
+            this.onClear();
+        });
+
+        this.db.on('put', (k, v) => {
+            this.onKeyChange(k, v);
+        });
+        this.db.on('del', (k) => {
+            this.onKeyChange(k, undefined);
+        });
+    }
+
+    private onClear(): void {
+        for (const dss of this.keyObservers.values()) {
+            for (const ds of dss) {
+                ds.update(undefined);
+            }
+        }
+    }
+
+    private onKeyChange(k: any, v: any) {
+        if (this.keyObservers.has(k)) {
+            for (const ds of this.keyObservers.get(k)) {
+                ds.update(v);
+            }
+        }
+    }
+
+    public observeLength(cancellationToken: CancellationToken): Promise<DataSource<number>> {
+        return this.observeKey(META_KEY, cancellationToken);
+    }
+
+    public observeAt(index: number, cancellationToken: CancellationToken): Promise<DataSource<T>> {
+        return this.observeKey(index.toString(), cancellationToken);
+    }
+
+    private async observeKey(key: string, cancellationToken: CancellationToken): Promise<DataSource<any>> {
+        await this.lock;
+        const ds = new DataSource<any>();
+
+        try {
+            const v = await this.db.get(key, { valueEncoding: 'json' });
+            ds.update(v);
+        } catch (e) {}
+
+        if (!this.keyObservers.has(key)) {
+            this.keyObservers.set(key, []);
+        }
+        console.log(`listen ${key}`);
+        this.keyObservers.get(key).push(ds);
+        cancellationToken.addCancelable(() => {
+            const dss = this.keyObservers.get(key);
+            const index = dss.indexOf(ds);
+            if (index !== -1) {
+                dss.splice(index, 1);
+            }
+        });
+
+        return ds;
+    }
+
+    /**
+     * Caution: This has to read the entire collection from the database on initialization which may be slow and memory intensive. Not recommended for collections with over 5k entries
+     */
+    public async observeEntireCollection(cancellationToken: CancellationToken): Promise<ArrayDataSource<T>> {
+        await this.lock;
+        const ads = new ArrayDataSource(await this.toArray());
+
+        this.totalObservers.push(ads);
+        cancellationToken.addCancelable(() => {
+            const index = this.totalObservers.indexOf(ads);
+            if (index !== -1) {
+                this.totalObservers.splice(index, 1);
+            }
+        });
+
+        return ads;
     }
 
     public async length(): Promise<number> {
+        await this.lock;
         return await this.db.get(META_KEY, { valueEncoding: 'json' });
     }
 
     public async get(index: number): Promise<T> {
+        await this.lock;
         const len = await this.length();
         if (index > len) {
             throw new Error('cannot read outside of bounds of array');
@@ -333,29 +472,47 @@ export class AurumDBOrderedCollection<T> {
     }
 
     public async set(index: number, item: T): Promise<void> {
+        await this.lock;
         const len = await this.length();
         if (index > len) {
             throw new Error('cannot write outside of bounds of array');
         }
 
+        for (const ads of this.totalObservers) {
+            ads.set(index, item);
+        }
         return this.db.put(index, item, {
             valueEncoding: 'json',
         });
     }
 
     public async push(...items: T[]): Promise<void> {
-        const len = await this.length();
-        for (let i = 0; i < items.length; i++) {
-            await this.db.put(`${len + i}`, items[i], {
+        await this.lock;
+        this.lock = new Promise(async (resolve) => {
+            const len = await this.length();
+            const batch = this.db.batch();
+            for (let i = 0; i < items.length; i++) {
+                //@ts-ignore
+                batch.put(`${len + i}`, items[i], {
+                    valueEncoding: 'json',
+                });
+            }
+            //@ts-ignore
+            batch.put(META_KEY, len + items.length, {
                 valueEncoding: 'json',
             });
-        }
-        await this.db.put(META_KEY, len + items.length, {
-            valueEncoding: 'json',
+            for (const ads of this.totalObservers) {
+                ads.appendArray(items);
+            }
+
+            await batch.write();
+            resolve(undefined);
         });
+        return this.lock;
     }
 
     public async slice(startIndex: number, endIndex: number): Promise<T[]> {
+        await this.lock;
         const len = await this.length();
         if (startIndex > len || startIndex < 0 || endIndex > len || endIndex < 0) {
             throw new Error('cannot write outside of bounds of array');
@@ -368,23 +525,39 @@ export class AurumDBOrderedCollection<T> {
     }
 
     public async pop(): Promise<T> {
-        const len = await this.length();
-        await this.db.put(META_KEY, len - 1, {
-            valueEncoding: 'json',
+        await this.lock;
+        this.lock = new Promise(async (resolve) => {
+            const len = await this.length();
+            const batch = this.db.batch();
+
+            const v = await this.db.get(len - 1, {
+                valueEncoding: 'json',
+            });
+            //@ts-ignore
+            batch.put(META_KEY, len - 1, {
+                valueEncoding: 'json',
+            });
+            batch.del(len - 1);
+            for (const ads of this.totalObservers) {
+                ads.pop();
+            }
+            await batch.write();
+            resolve(v);
         });
-        const v = await this.db.get(len - 1, {
-            valueEncoding: 'json',
-        });
-        await this.db.del(len - 1);
-        return v;
+        return this.lock;
     }
 
     async clear(): Promise<void> {
+        await this.lock;
         await this.db.clear();
+        for (const ads of this.totalObservers) {
+            ads.clear();
+        }
         this.db.put(META_KEY, 0, { valueEncoding: 'json' });
     }
 
     async toArray(): Promise<T[]> {
+        await this.lock;
         const items = [];
         const len = await this.length();
         for (let i = 0; i < len; i++) {
@@ -394,6 +567,7 @@ export class AurumDBOrderedCollection<T> {
         return items;
     }
     async forEach(cb: (item: T, index: number) => void): Promise<void> {
+        await this.lock;
         const len = await this.length();
         for (let i = 0; i < len; i++) {
             cb(

@@ -41,6 +41,22 @@ describe('test', () => {
             assert((await db.hasIndex('test')) === false);
         });
 
+        it('create nested index', async () => {
+            const index = await db.createIndex('test');
+            const subIndex = await index.createIndex('subIndex');
+
+            assert((await db.hasIndex('subIndex')) === false);
+            assert((await index.hasIndex('subIndex')) === true);
+
+            await subIndex.set('hello', 'world');
+            assert((await index.has('hello')) === false);
+            assert((await subIndex.has('hello')) === true);
+
+            await db.clear();
+
+            assert((await db.hasIndex('test')) === false);
+        });
+
         it('populate index', async () => {
             const index = await db.createIndex('test');
             await index.set('hello', 'world', 'utf8');
@@ -151,6 +167,103 @@ describe('test', () => {
             assert((await db.hasOrderedCollection('test')) === true);
             await db.deleteOrderedCollection('test');
             assert((await db.hasOrderedCollection('test')) === false);
+            await assertDbEmpty();
+        });
+
+        it('push into ordered collection', async () => {
+            const collection = await db.createOrderedCollection<number>('test');
+
+            const promises = [];
+            /**
+             * Locking mechanism provides the synchronization so no await needed here for this to work. In fact it has to work without await
+             */
+            promises.push(collection.push(1));
+            promises.push(collection.push(2));
+            promises.push(collection.push(3));
+
+            await Promise.all(promises);
+
+            assert((await collection.length()) === 3);
+
+            await collection.clear();
+            assert((await db.hasOrderedCollection('test')) === true);
+            assert((await collection.length()) === 0);
+
+            await db.clear();
+
+            await assertDbEmpty();
+        });
+
+        it('pop from ordered collection', async () => {
+            const collection = await db.createOrderedCollection<number>('test');
+
+            collection.push(1);
+            collection.push(2);
+            collection.push(3);
+
+            assert((await collection.pop()) === 3);
+            assert((await collection.pop()) === 2);
+
+            assert((await collection.length()) === 1);
+
+            await db.clear();
+
+            await assertDbEmpty();
+        });
+
+        it('iterate over collection', async () => {
+            const collection = await db.createOrderedCollection<number>('test');
+
+            await collection.push(1);
+            await collection.push(2);
+            await collection.push(3);
+
+            assert.deepStrictEqual(await collection.toArray(), [1, 2, 3]);
+            const pairs = [
+                [1, 0],
+                [2, 1],
+                [3, 2],
+            ];
+
+            await collection.forEach((item, index) => {
+                assert.deepStrictEqual([item, index], pairs.shift());
+            });
+            assert(pairs.length === 0);
+
+            await db.clear();
+            await assertDbEmpty();
+        });
+
+        it('slice collection', async () => {
+            const collection = await db.createOrderedCollection<number>('test');
+
+            await collection.push(1, 2, 3, 4, 5);
+
+            assert.deepStrictEqual(await collection.slice(0, 2), [1, 2]);
+            assert.deepStrictEqual(await collection.slice(1, 1), []);
+            assert.deepStrictEqual(await collection.slice(0, 1), [1]);
+            assert.deepStrictEqual(await collection.slice(0, 5), [1, 2, 3, 4, 5]);
+
+            await db.clear();
+            await assertDbEmpty();
+        });
+
+        it('observe collection', async () => {
+            const collection = await db.createOrderedCollection<number>('test');
+
+            const token = new CancellationToken();
+            const index = await collection.observeAt(3, token);
+            const length = await collection.observeLength(token);
+
+            assert(index.value === undefined);
+            assert(length.value === 0);
+
+            await collection.push(1, 2, 3, 4, 5);
+
+            assert.strictEqual(index.value, 4);
+            assert.strictEqual(length.value, 5);
+
+            await db.clear();
             await assertDbEmpty();
         });
     });
