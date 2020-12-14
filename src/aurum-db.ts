@@ -492,15 +492,9 @@ export class AurumDBOrderedCollection<T> {
             const len = await this.length();
             const batch = this.db.batch();
             for (let i = 0; i < items.length; i++) {
-                //@ts-ignore
-                batch.put(`${len + i}`, items[i], {
-                    valueEncoding: 'json',
-                });
+                batch.put(`${len + i}`, items[i]);
             }
-            //@ts-ignore
-            batch.put(META_KEY, len + items.length, {
-                valueEncoding: 'json',
-            });
+            batch.put(META_KEY, len + items.length);
             for (const ads of this.totalObservers) {
                 ads.appendArray(items);
             }
