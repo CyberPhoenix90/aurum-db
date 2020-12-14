@@ -1,6 +1,6 @@
 {
     "name": "aurum-db",
-    "version": "0.0.3",
+    "version": "0.0.5",
     "description": "Wrapper around leveldb that makes it possible to read the DB using aurum streams",
     "main": "prebuilt/cjs/aurum-db.js",
     "typings": "prebuilt/esnext/aurum-db.d.ts",

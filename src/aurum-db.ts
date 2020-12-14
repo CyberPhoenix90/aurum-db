@@ -94,11 +94,16 @@ export class AurumDB {
         }
     }
 
-    public async createOrGetIndex(name: string): Promise<AurumDBIndex> {
+    public async createOrGetIndex(name: string, defaultEncoding?: Encodings): Promise<AurumDBIndex> {
         if (await this.hasIndex(name)) {
-            return new AurumDBIndex(sub(this.db, name + 'index'), this.config);
+            return new AurumDBIndex(
+                sub(this.db, name + 'index', {
+                    valueEncoding: defaultEncoding,
+                }),
+                this.config
+            );
         } else {
-            return this.createIndex(name);
+            return this.createIndex(name, defaultEncoding);
         }
     }
 
@@ -110,11 +115,15 @@ export class AurumDB {
         }
     }
 
-    public async createOrGetOrderedCollection<T>(name: string): Promise<AurumDBOrderedCollection<T>> {
+    public async createOrGetOrderedCollection<T>(name: string, defaultEncoding?: Encodings): Promise<AurumDBOrderedCollection<T>> {
         if (await this.hasOrderedCollection(name)) {
-            return new AurumDBOrderedCollection<T>(sub(this.db, name + 'ordered'));
+            return new AurumDBOrderedCollection<T>(
+                sub(this.db, name + 'ordered', {
+                    valueEncoding: defaultEncoding,
+                })
+            );
         } else {
-            return this.createOrderedCollection(name);
+            return this.createOrderedCollection(name, defaultEncoding);
         }
     }
 
@@ -139,7 +148,7 @@ export class AurumDB {
      * Suitable use cases: Unordered lists, Hash maps, Nested Hash maps
      * Unsuitable use cases: Stacks, Ordered lists, Queues
      */
-    public async createIndex(name: string): Promise<AurumDBIndex> {
+    public async createIndex(name: string, defaultEncoding?: Encodings): Promise<AurumDBIndex> {
         if (await this.hasIndex(name)) {
             throw new Error(`Index ${name} already exists`);
         }
@@ -147,14 +156,19 @@ export class AurumDB {
         await this.db.put(makeSubDbId(name, META_KEY), new Date().toJSON(), {
             valueEncoding: 'json',
         });
-        return new AurumDBIndex(sub(this.db, name), this.config);
+        return new AurumDBIndex(
+            sub(this.db, name, {
+                valueEncoding: defaultEncoding,
+            }),
+            this.config
+        );
     }
     /**
      * An ordered collection is basically an array, all items have a numerical index. Delete and Insert of items that are not the last one in the array can be very expensive. Write operations lock the entire collection due to lack of thread safetly.
      * Suitable use cases: Stacks, Append only list, Random access lists
      * Unsuitable: Queues, Hash Maps
      */
-    public async createOrderedCollection<T>(name: string): Promise<AurumDBOrderedCollection<T>> {
+    public async createOrderedCollection<T>(name: string, defaultEncoding?: Encodings): Promise<AurumDBOrderedCollection<T>> {
         if (await this.hasOrderedCollection(name)) {
             throw new Error(`Ordered Collection ${name} already exists`);
         }
@@ -162,7 +176,11 @@ export class AurumDB {
         await this.db.put(makeSubDbId(name, META_KEY), 0, {
             valueEncoding: 'json',
         });
-        return new AurumDBOrderedCollection<T>(sub(this.db, name));
+        return new AurumDBOrderedCollection<T>(
+            sub(this.db, name, {
+                valueEncoding: defaultEncoding,
+            })
+        );
     }
 
     /**
@@ -468,7 +486,7 @@ export class AurumDBOrderedCollection<T> {
         if (index > len) {
             throw new Error('cannot read outside of bounds of array');
         }
-        return this.db.get(index, { valueEncoding: 'json' });
+        return this.db.get(index);
     }
 
     public async set(index: number, item: T): Promise<void> {
@@ -481,9 +499,7 @@ export class AurumDBOrderedCollection<T> {
         for (const ads of this.totalObservers) {
             ads.set(index, item);
         }
-        return this.db.put(index, item, {
-            valueEncoding: 'json',
-        });
+        return this.db.put(index, item);
     }
 
     public async push(...items: T[]): Promise<void> {
@@ -513,7 +529,7 @@ export class AurumDBOrderedCollection<T> {
         }
         const items = [];
         for (let i = startIndex; i < endIndex; i++) {
-            items.push(await this.db.get(i, { valueEncoding: 'json' }));
+            items.push(await this.db.get(i));
         }
         return items;
     }
@@ -524,9 +540,7 @@ export class AurumDBOrderedCollection<T> {
             const len = await this.length();
             const batch = this.db.batch();
 
-            const v = await this.db.get(len - 1, {
-                valueEncoding: 'json',
-            });
+            const v = await this.db.get(len - 1);
             //@ts-ignore
             batch.put(META_KEY, len - 1, {
                 valueEncoding: 'json',
@@ -555,7 +569,7 @@ export class AurumDBOrderedCollection<T> {
         const items = [];
         const len = await this.length();
         for (let i = 0; i < len; i++) {
-            items.push(await this.db.get(i, { valueEncoding: 'json' }));
+            items.push(await this.db.get(i));
         }
 
         return items;
@@ -564,12 +578,7 @@ export class AurumDBOrderedCollection<T> {
         await this.lock;
         const len = await this.length();
         for (let i = 0; i < len; i++) {
-            cb(
-                await this.db.get(i, {
-                    valueEncoding: 'json',
-                }),
-                i
-            );
+            cb(await this.db.get(i), i);
         }
     }
 }

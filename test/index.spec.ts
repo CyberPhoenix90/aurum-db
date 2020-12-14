@@ -195,14 +195,14 @@ describe('test', () => {
         });
 
         it('pop from ordered collection', async () => {
-            const collection = await db.createOrderedCollection<number>('test');
+            const collection = await db.createOrderedCollection<number>('test', 'json');
 
             collection.push(1);
             collection.push(2);
             collection.push(3);
 
-            assert((await collection.pop()) === 3);
-            assert((await collection.pop()) === 2);
+            assert.strictEqual(await collection.pop(), 3);
+            assert.strictEqual(await collection.pop(), 2);
 
             assert((await collection.length()) === 1);
 
@@ -212,7 +212,7 @@ describe('test', () => {
         });
 
         it('iterate over collection', async () => {
-            const collection = await db.createOrderedCollection<number>('test');
+            const collection = await db.createOrderedCollection<number>('test', 'json');
 
             await collection.push(1);
             await collection.push(2);
@@ -235,7 +235,7 @@ describe('test', () => {
         });
 
         it('slice collection', async () => {
-            const collection = await db.createOrderedCollection<number>('test');
+            const collection = await db.createOrderedCollection<number>('test', 'json');
 
             await collection.push(1, 2, 3, 4, 5);
 
