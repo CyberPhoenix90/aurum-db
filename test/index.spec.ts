@@ -58,11 +58,11 @@ describe('test', () => {
         });
 
         it('populate index', async () => {
-            const index = await db.createIndex('test');
+            const index = await db.createIndex<any>('test');
             await index.set('hello', 'world', 'utf8');
             assert((await index.get('hello', 'utf8')) === 'world');
             await index.set('testBinary', Buffer.from([1, 2, 3, 4]), 'binary');
-            assert((await index.get('testBinary', 'binary')).equals(Buffer.from([1, 2, 3, 4])));
+            assert(Buffer.compare(await index.get('testBinary', 'binary'), Buffer.from([1, 2, 3, 4])) === 0);
             await index.set('testJson', [1, 2, 3, 4], 'json');
             assert.deepStrictEqual(await index.get('testJson', 'json'), [1, 2, 3, 4]);
 
@@ -285,42 +285,19 @@ describe('test', () => {
         return new Promise((resolve) => setTimeout(resolve, time));
     }
 
-    function dumpDB(): Promise<void> {
+    async function dumpDB(): Promise<void> {
         const iter = db.iterator();
-        return new Promise<void>((resolve, reject) => {
-            iter.next(function cb(err, key, value) {
-                if (err) {
-                    iter.end(() => void 0);
-                    reject(err);
-                }
-                if (key === undefined) {
-                    iter.end(() => void 0);
-                    resolve();
-                } else {
-                    console.log(`${key} :: ${value}`);
-                    iter.next(cb);
-                }
-            });
-        });
+        while (await iter.next()) {
+            const { key, value } = iter.current;
+            console.log(`${key} :: ${value}`);
+        }
     }
 
-    function assertDbEmpty(): Promise<void> {
+    async function assertDbEmpty(): Promise<void> {
         const iter = db.iterator();
-        return new Promise((resolve, reject) => {
-            iter.next((err, key, value) => {
-                if (err) {
-                    iter.end(() => void 0);
-                    reject(err);
-                }
-
-                if (key === undefined) {
-                    iter.end(() => void 0);
-                    resolve();
-                } else {
-                    iter.end(() => void 0);
-                    reject(new Error(`DB not empty found: ${key} :: ${value}`));
-                }
-            });
-        });
+        while (await iter.next()) {
+            const { key, value } = iter.current;
+            throw new Error(`DB not empty found: ${key} :: ${value}`);
+        }
     }
 });

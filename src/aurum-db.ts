@@ -1,9 +1,10 @@
-import { AbstractIterator, AbstractIteratorOptions, AbstractBatch } from 'abstract-leveldown';
+import { AbstractBatch, AbstractIteratorOptions } from 'abstract-leveldown';
 import { ArrayDataSource, CancellationToken, DataSource, MapDataSource } from 'aurumjs';
 import * as level from 'level';
 import { LevelUp } from 'levelup';
 import * as sub from 'subleveldown';
-import { BinaryEncodings, Encodings, JsonEncoding, TextEncodings } from './leveldb';
+import { AurumDBIterator } from './iterator';
+import { Encodings } from './leveldb';
 
 type AurumDBIntegrityConfig = {
     autoDeleteOnSetUndefined?: boolean;
@@ -13,6 +14,8 @@ interface AurumDBConfig {
     path: string;
     integrity?: AurumDBIntegrityConfig;
 }
+
+export * from './iterator';
 
 export async function initializeDatabase(config: AurumDBConfig): Promise<AurumDB> {
     const db = await level(config.path);
@@ -40,8 +43,8 @@ export class AurumDB {
         this.db = db;
     }
 
-    public iterator(options?: AbstractIteratorOptions): AbstractIterator<string, any> {
-        return this.db.iterator(options);
+    public iterator(options?: AbstractIteratorOptions): AurumDBIterator<any> {
+        return new AurumDBIterator<any>(this.db.iterator(options));
     }
 
     public clear(): Promise<void> {
@@ -86,17 +89,17 @@ export class AurumDB {
         return true;
     }
 
-    public async getIndex(name: string): Promise<AurumDBIndex> {
+    public async getIndex<T>(name: string): Promise<AurumDBIndex<T>> {
         if (await this.hasIndex(name)) {
-            return new AurumDBIndex(sub(this.db, name + 'index'), this.config);
+            return new AurumDBIndex<T>(sub(this.db, name + 'index'), this.config);
         } else {
             throw new Error(`Index ${name} does not exist`);
         }
     }
 
-    public async createOrGetIndex(name: string, defaultEncoding?: Encodings): Promise<AurumDBIndex> {
+    public async createOrGetIndex<T>(name: string, defaultEncoding?: Encodings): Promise<AurumDBIndex<T>> {
         if (await this.hasIndex(name)) {
-            return new AurumDBIndex(
+            return new AurumDBIndex<T>(
                 sub(this.db, name + 'index', {
                     valueEncoding: defaultEncoding,
                 }),
@@ -148,7 +151,7 @@ export class AurumDB {
      * Suitable use cases: Unordered lists, Hash maps, Nested Hash maps
      * Unsuitable use cases: Stacks, Ordered lists, Queues
      */
-    public async createIndex(name: string, defaultEncoding?: Encodings): Promise<AurumDBIndex> {
+    public async createIndex<T>(name: string, defaultEncoding?: Encodings): Promise<AurumDBIndex<T>> {
         if (await this.hasIndex(name)) {
             throw new Error(`Index ${name} already exists`);
         }
@@ -156,7 +159,7 @@ export class AurumDB {
         await this.db.put(makeSubDbId(name, META_KEY), new Date().toJSON(), {
             valueEncoding: 'json',
         });
-        return new AurumDBIndex(
+        return new AurumDBIndex<T>(
             sub(this.db, name, {
                 valueEncoding: defaultEncoding,
             }),
@@ -200,7 +203,7 @@ export class AurumDB {
     }
 }
 
-export class AurumDBIndex extends AurumDB {
+export class AurumDBIndex<T> extends AurumDB {
     private totalObservers: MapDataSource<string, any>[];
     private keyObservers: Map<string, DataSource<any>[]>;
 
@@ -238,6 +241,10 @@ export class AurumDBIndex extends AurumDB {
         });
     }
 
+    public iterator(options?: AbstractIteratorOptions): AurumDBIterator<T> {
+        return new AurumDBIterator<T>(this.db.iterator(options));
+    }
+
     private onClear(): void {
         for (const mds of this.totalObservers) {
             for (const k of mds.keys()) {
@@ -252,7 +259,7 @@ export class AurumDBIndex extends AurumDB {
         }
     }
 
-    private onKeyChange(k: any, v: any): void {
+    private onKeyChange(k: string, v: T): void {
         for (const mds of this.totalObservers) {
             if (v === undefined) {
                 mds.delete(k);
@@ -271,7 +278,7 @@ export class AurumDBIndex extends AurumDB {
      * Caution: While this is very useful for reactivity this has a high cost, it has to read the entire index to get started, if your index is huge this may even make your application go out of memory, to be used only with moderate sized indexes.
      * Suggested max size: 5k entries
      */
-    public async observeEntireIndex<T>(cancellationToken: CancellationToken, valueEncoding?: Encodings): Promise<MapDataSource<string, T>> {
+    public async observeEntireIndex(cancellationToken: CancellationToken, valueEncoding?: Encodings): Promise<MapDataSource<string, T>> {
         const iter = this.iterator({
             values: false,
         });
@@ -283,27 +290,16 @@ export class AurumDBIndex extends AurumDB {
                 this.totalObservers.splice(index, 1);
             }
         });
-        let that = this;
-        return new Promise<MapDataSource<string, T>>((resolve, reject) => {
-            iter.next(async function cb(err, key) {
-                if (err) {
-                    iter.end(() => void 0);
-                    reject(err);
-                }
-                if (key === undefined) {
-                    iter.end(() => void 0);
-                    resolve(result);
-                } else if (!key.includes('!')) {
-                    result.set(key, await that.get(key, valueEncoding));
-                    iter.next(cb);
-                } else {
-                    iter.next(cb);
-                }
-            });
-        });
+        while (await iter.next()) {
+            const { key } = iter.current;
+            if (!key.includes('!')) {
+                result.set(key, await this.get(key, valueEncoding));
+            }
+        }
+        return result;
     }
 
-    public async observeKey<T>(key: string, cancellationToken: CancellationToken, valueEncoding?: Encodings): Promise<DataSource<T>> {
+    public async observeKey(key: string, cancellationToken: CancellationToken, valueEncoding?: Encodings): Promise<DataSource<T>> {
         const ds = new DataSource<T>();
 
         if (await this.has(key)) {
@@ -325,30 +321,24 @@ export class AurumDBIndex extends AurumDB {
         return ds;
     }
 
-    public get(key: string, encoding: JsonEncoding): Promise<any>;
-    public get(key: string, encoding: BinaryEncodings): Promise<Buffer>;
-    public get(key: string, encoding: TextEncodings): Promise<string>;
-    public get(key: string, encoding?: Encodings): Promise<any>;
-    public get(key: string, encoding?: Encodings): Promise<any> {
+    public get(key: string, overrideEncoding?: Encodings): Promise<T> {
         return this.db.get(key, {
-            valueEncoding: encoding,
+            valueEncoding: overrideEncoding,
         });
     }
 
-    public set(key: string, value: any, encoding: JsonEncoding): Promise<void>;
-    public set(key: string, value: Buffer, encoding: BinaryEncodings): Promise<void>;
-    public set(key: string, value: string, encoding: TextEncodings): Promise<void>;
-    public set(key: string, value: any, encoding?: Encodings): Promise<void>;
-    public set(key: string, value: any, encoding?: Encodings): Promise<void> {
+    public set(key: string, value: T, overrideEncoding?: Encodings): Promise<void> {
         if (this.config.autoDeleteOnSetUndefined && (value === undefined || value === null)) {
             return this.db.del(key);
         } else {
-            return this.db.put(key, value, { valueEncoding: encoding });
+            return this.db.put(key, value, { valueEncoding: overrideEncoding });
         }
     }
+
     public delete(key: string): Promise<void> {
         return this.db.del(key);
     }
+
     public async clear(): Promise<void> {
         const val = await this.get(META_KEY, 'json');
         await this.db.clear();
@@ -463,6 +453,28 @@ export class AurumDBOrderedCollection<T> {
     public async observeEntireCollection(cancellationToken: CancellationToken): Promise<ArrayDataSource<T>> {
         await this.lock;
         const ads = new ArrayDataSource(await this.toArray());
+
+        this.totalObservers.push(ads);
+        cancellationToken.addCancelable(() => {
+            const index = this.totalObservers.indexOf(ads);
+            if (index !== -1) {
+                this.totalObservers.splice(index, 1);
+            }
+        });
+
+        return ads;
+    }
+
+    /**
+     * Creates an array datasource that contains the last N elements inside this ordered collection. Useful for cases where you need to observe the latest of a list of transactions or events
+     */
+    public async observeLastNElements(amount: number, cancellationToken: CancellationToken): Promise<ArrayDataSource<T>> {
+        await this.lock;
+        const len = await this.length();
+        const ads = new ArrayDataSource<T>();
+        for (let i = Math.max(0, len - amount); i < len; i++) {
+            ads.push(await this.get(i));
+        }
 
         this.totalObservers.push(ads);
         cancellationToken.addCancelable(() => {
