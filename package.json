@@ -1,12 +1,12 @@
 {
     "name": "aurum-db",
-    "version": "0.0.7",
+    "version": "0.0.8",
     "description": "Wrapper around leveldb that makes it possible to read the DB using aurum streams",
     "main": "prebuilt/cjs/aurum-db.js",
     "typings": "prebuilt/esnext/aurum-db.d.ts",
     "dependencies": {
         "@types/node": "^14.14.12",
-        "aurumjs": "^0.5.49",
+        "aurumjs": "^0.5.53",
         "level": "^6.0.1",
         "level-stream-access": "^2.3.0",
         "subleveldown": "^5.0.1"
