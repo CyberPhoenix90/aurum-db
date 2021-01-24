@@ -2,6 +2,8 @@ import * as assert from 'assert';
 import { AurumDB, initializeDatabase } from '../src/aurum-db';
 import { LevelUp } from 'levelup';
 import { CancellationToken } from 'aurumjs';
+import { promisify } from 'util';
+import { ReadStream } from 'fs';
 
 describe('test', () => {
     let db: AurumDB;
@@ -29,7 +31,43 @@ describe('test', () => {
         await assertDbEmpty();
         await db.clear();
     });
+    describe('streamable index', () => {
+        it('create and delete streamable index', async () => {
+            assert((await db.hasStreamableIndex('test')) === false);
+            await db.createStreamableIndex('test');
+            assert((await db.hasStreamableIndex('test')) === true);
+            assert((await db.hasIndex('test')) === false);
+            assert((await db.hasLinkedCollection('test')) === false);
+            assert((await db.hasOrderedCollection('test')) === false);
+            await db.deleteStreamableIndex('test');
+            assert((await db.hasStreamableIndex('test')) === false);
+        });
 
+        it('populate index', async () => {
+            const index = await db.createStreamableIndex<any>('test');
+            const writing = index.write('fileA');
+            assert(await index.getRecordState('fileA'), 'recording');
+            await promisify(writing.end.bind(writing))('hello world');
+            assert(await index.getRecordState('fileA'), 'complete');
+
+            const reading = index.read('fileA');
+            const data = await streamToString(reading);
+
+            assert(data === 'hello world');
+            await db.deleteStreamableIndex('test');
+        });
+
+        it('has key', async () => {
+            const index = await db.createStreamableIndex<any>('test');
+            const writing = index.write('fileA');
+            await promisify(writing.end.bind(writing))('hello world');
+            assert((await index.has('fileA')) === true);
+            await index.delete('fileA');
+            assert((await index.has('fileA')) === false);
+
+            await db.deleteStreamableIndex('test');
+        });
+    });
     describe('index', () => {
         it('create and delete index', async () => {
             assert((await db.hasIndex('test')) === false);
@@ -301,3 +339,12 @@ describe('test', () => {
         }
     }
 });
+
+function streamToString(stream: ReadStream): Promise<string> {
+    const chunks = [];
+    return new Promise((resolve, reject) => {
+        stream.on('data', (chunk) => chunks.push(chunk));
+        stream.on('error', reject);
+        stream.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
+    });
+}
