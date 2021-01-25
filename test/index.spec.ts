@@ -1,9 +1,9 @@
 import * as assert from 'assert';
-import { AurumDB, initializeDatabase } from '../src/aurum-db';
-import { LevelUp } from 'levelup';
 import { CancellationToken } from 'aurumjs';
-import { promisify } from 'util';
 import { ReadStream } from 'fs';
+import { LevelUp } from 'levelup';
+import { promisify } from 'util';
+import { AurumDB, initializeDatabase } from '../src/aurum-db';
 
 describe('test', () => {
     let db: AurumDB;
@@ -45,10 +45,10 @@ describe('test', () => {
 
         it('populate index', async () => {
             const index = await db.createStreamableIndex<any>('test');
-            const writing = index.write('fileA');
-            assert(await index.getRecordState('fileA'), 'recording');
+            const writing = await index.write('fileA');
+            assert((await index.getRecordState('fileA')).state === 'recording');
             await promisify(writing.end.bind(writing))('hello world');
-            assert(await index.getRecordState('fileA'), 'complete');
+            assert((await index.getRecordState('fileA')).state === 'complete');
 
             const reading = index.read('fileA');
             const data = await streamToString(reading);
@@ -59,7 +59,7 @@ describe('test', () => {
 
         it('has key', async () => {
             const index = await db.createStreamableIndex<any>('test');
-            const writing = index.write('fileA');
+            const writing = await index.write('fileA');
             await promisify(writing.end.bind(writing))('hello world');
             assert((await index.has('fileA')) === true);
             await index.delete('fileA');

@@ -36,9 +36,15 @@ export class AurumDBStreamableIndex<T> {
         });
     }
 
-    public getRecordState(key: string): Promise<'recording' | 'complete'> {
+    public getRecordState(key: string): Promise<{ state: 'recording' | 'complete'; start: number }> {
         return new Promise((resolve, reject) => {
-            this.db.get(key, (err, value) => (err ? reject(err) : resolve(value)));
+            this.db.get(
+                key,
+                {
+                    valueEncoding: 'json',
+                },
+                (err, value) => (err ? reject(err) : resolve(value))
+            );
         });
     }
 
@@ -46,11 +52,23 @@ export class AurumDBStreamableIndex<T> {
         return this.streamableDb.createWriteStream(key);
     }
 
-    public write(key: string): WriteStream {
-        this.db.put(key, 'recording');
+    public async write(key: string): Promise<WriteStream> {
+        await this.db.put(
+            key,
+            { state: 'recording', start: Date.now() },
+            {
+                valueEncoding: 'json',
+            }
+        );
         const s = this.streamableDb.createWriteStream(key, { append: false });
         s.on('close', () => {
-            this.db.put(key, 'complete');
+            this.db.put(
+                key,
+                { state: 'complete', start: Date.now() },
+                {
+                    valueEncoding: 'json',
+                }
+            );
         });
         return s;
     }
