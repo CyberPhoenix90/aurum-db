@@ -95,6 +95,24 @@ describe('test', () => {
             assert((await db.hasIndex('test')) === false);
         });
 
+        it('can create record with same key as sub index without issues', async () => {
+            const index = await db.createIndex('test');
+            const subIndex = await index.createIndex('subIndex');
+            await index.set('subIndex', '123');
+
+            assert((await db.hasIndex('subIndex')) === false);
+            assert((await index.hasIndex('subIndex')) === true);
+
+            await subIndex.set('hello', 'world');
+            assert((await index.has('hello')) === false);
+            assert((await subIndex.has('hello')) === true);
+            assert((await index.get('subIndex')) === '123');
+
+            await db.clear();
+
+            assert((await db.hasIndex('test')) === false);
+        });
+
         it('populate index', async () => {
             const index = await db.createIndex<any>('test');
             await index.set('hello', 'world', 'utf8');
