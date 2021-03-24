@@ -335,12 +335,10 @@ export class AurumDBIndex<T> extends AurumDB {
 
     /**
      * Caution: While this is very useful for reactivity this has a high cost, it has to read the entire index to get started, if your index is huge this may even make your application go out of memory, to be used only with moderate sized indexes.
-     * Suggested max size: 5k entries
+     * Suggested max size: 5k entries. For larger data sets consider chunking your data with sub indexes
      */
     public async observeEntireIndex(cancellationToken: CancellationToken, valueEncoding?: Encodings): Promise<MapDataSource<string, T>> {
-        const iter = this.iterator({
-            values: false,
-        });
+        const iter = this.iterator({});
         const result = new MapDataSource<string, T>();
         this.totalObservers.push(result);
         cancellationToken.addCancelable(() => {
@@ -349,11 +347,10 @@ export class AurumDBIndex<T> extends AurumDB {
                 this.totalObservers.splice(index, 1);
             }
         });
+
         while (await iter.next()) {
-            const { key } = iter.current;
-            if (!key.includes('!')) {
-                result.set(key, await this.get(key, valueEncoding));
-            }
+            const { key, value } = iter.current;
+            result.set(key, value);
         }
         return result;
     }

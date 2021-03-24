@@ -2,6 +2,7 @@ import { ArrayDataSource, DataSource, CancellationToken } from 'aurumjs';
 import { AbstractBatch } from 'abstract-leveldown';
 import { LevelUp } from 'levelup';
 import { META_KEY } from '../constants';
+import { AurumDBIterator } from '../iterator';
 
 export class AurumDBOrderedCollection<T> {
     private totalObservers: ArrayDataSource<T>[];
@@ -218,7 +219,7 @@ export class AurumDBOrderedCollection<T> {
         for (const ads of this.totalObservers) {
             ads.clear();
         }
-        this.db.put(META_KEY, 0, { valueEncoding: 'json' });
+        await this.db.put(META_KEY, 0, { valueEncoding: 'json' });
     }
 
     async toArray(): Promise<T[]> {
@@ -233,9 +234,10 @@ export class AurumDBOrderedCollection<T> {
     }
     async forEach(cb: (item: T, index: number) => void): Promise<void> {
         await this.lock;
-        const len = await this.length();
-        for (let i = 0; i < len; i++) {
-            cb(await this.db.get(i), i);
+        const iterator = new AurumDBIterator<T>(this.db.iterator({}));
+        let i = 0;
+        while (await iterator.next()) {
+            cb(iterator.current.value, i++);
         }
     }
 }

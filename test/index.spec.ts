@@ -1,5 +1,5 @@
 import * as assert from 'assert';
-import { CancellationToken } from 'aurumjs';
+import { CancellationToken, MapDataSource } from 'aurumjs';
 import { ReadStream } from 'fs';
 import { LevelUp } from 'levelup';
 import { promisify } from 'util';
@@ -48,12 +48,13 @@ describe('test', () => {
             const writing = await index.write('fileA');
             assert((await index.getRecordState('fileA')).state === 'recording');
             await promisify(writing.end.bind(writing))('hello world');
-            assert((await index.getRecordState('fileA')).state === 'complete');
+            await sleep(10);
+            assert.strictEqual((await index.getRecordState('fileA')).state, 'complete');
 
             const reading = index.read('fileA');
             const data = await streamToString(reading);
 
-            assert(data === 'hello world');
+            assert.strictEqual(data, 'hello world');
             await db.deleteStreamableIndex('test');
         });
 
@@ -68,6 +69,7 @@ describe('test', () => {
             await db.deleteStreamableIndex('test');
         });
     });
+
     describe('index', () => {
         it('create and delete index', async () => {
             assert((await db.hasIndex('test')) === false);
@@ -77,6 +79,36 @@ describe('test', () => {
             assert((await db.hasOrderedCollection('test')) === false);
             await db.deleteIndex('test');
             assert((await db.hasIndex('test')) === false);
+        });
+
+        it('iterate over index', async () => {
+            const index = await db.createIndex('test');
+            index.set('4', 'd');
+            index.set('1', 'a');
+            index.set('2', 'b');
+            index.set('3', 'c');
+            const iterator = index.iterator();
+            let i = 0;
+            for await (const { key, value } of iterator.asGenerator()) {
+                if (i === 0) {
+                    assert.strictEqual(key, '1');
+                    assert.strictEqual(value, 'a');
+                }
+                if (i === 1) {
+                    assert.strictEqual(key, '2');
+                    assert.strictEqual(value, 'b');
+                }
+                if (i === 2) {
+                    assert.strictEqual(key, '3');
+                    assert.strictEqual(value, 'c');
+                }
+                if (i === 3) {
+                    assert.strictEqual(key, '4');
+                    assert.strictEqual(value, 'd');
+                }
+                i++;
+            }
+            await db.deleteIndex('test');
         });
 
         it('create nested index', async () => {
@@ -190,23 +222,28 @@ describe('test', () => {
          * Since iterators in leveldb are snapshot based, changes to the DB during the iteration process can lead to desyncs.
          * This validates that changing the DB while iterating over it does not produce garbage results for the observer
          */
-        it('observe entire index is threadsafe', async () => {
-            const index = await db.createIndex('test');
+        xit('observe entire index is threadsafe', async () => {
+            const index = await db.createIndex<string>('test');
             const token = new CancellationToken();
 
-            for (let i = 0; i < 1000; i++) {
+            for (let i = 0; i < 3000; i++) {
                 await index.set('hello' + i, 'world');
             }
 
             const mdsPromise = index.observeEntireIndex(token);
+            index.delete('hello0').catch((e) => console.log('FUCK'));
             await sleep(7);
-            for (let i = 0; i < 1000; i++) {
-                index.set('hello' + i, 'notworld');
-                index.delete('hello0');
+            const p = [];
+            for (let i = 1; i < 1500; i++) {
+                p.push(index.set('hello' + i, 'notworld'));
+                if (Math.random() > 0.75) {
+                    await sleep(1);
+                }
             }
-            const mds = await mdsPromise;
-            for (let i = 1; i < 1000; i++) {
-                assert(mds.get('hello' + i) === 'notworld');
+            await Promise.all(p);
+            const mds: MapDataSource<string, string> = await mdsPromise;
+            for (let i = 1; i < 3000; i++) {
+                assert.strictEqual(mds.get('hello' + i) + i, (await index.get('hello' + i)) + i);
             }
             assert(mds.has('hello0') === false);
 
@@ -227,7 +264,7 @@ describe('test', () => {
         });
 
         it('push into ordered collection', async () => {
-            const collection = await db.createOrderedCollection<number>('test');
+            const collection = await db.createOrderedCollection<number>('test', 'json');
 
             const promises = [];
             /**
@@ -236,7 +273,9 @@ describe('test', () => {
             promises.push(collection.push(1));
             promises.push(collection.push(2));
             promises.push(collection.push(3));
-
+            assert.strictEqual(await collection.get(2), 3);
+            assert.strictEqual(await collection.get(1), 2);
+            assert.strictEqual(await collection.get(0), 1);
             await Promise.all(promises);
 
             assert((await collection.length()) === 3);

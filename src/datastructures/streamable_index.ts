@@ -36,7 +36,7 @@ export class AurumDBStreamableIndex<T> {
         });
     }
 
-    public getRecordState(key: string): Promise<{ state: 'recording' | 'complete'; start: number }> {
+    public getRecordState(key: string): Promise<{ state: 'recording' | 'complete'; lastChange: number }> {
         return new Promise((resolve, reject) => {
             this.db.get(
                 key,
@@ -55,7 +55,7 @@ export class AurumDBStreamableIndex<T> {
     public async write(key: string): Promise<WriteStream> {
         await this.db.put(
             key,
-            { state: 'recording', start: Date.now() },
+            { state: 'recording', lastChange: Date.now() },
             {
                 valueEncoding: 'json',
             }
@@ -64,7 +64,7 @@ export class AurumDBStreamableIndex<T> {
         s.on('close', () => {
             this.db.put(
                 key,
-                { state: 'complete', start: Date.now() },
+                { state: 'complete', lastChange: Date.now() },
                 {
                     valueEncoding: 'json',
                 }

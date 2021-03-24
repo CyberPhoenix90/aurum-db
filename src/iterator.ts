@@ -1,3 +1,5 @@
+import { META_KEY } from './constants';
+
 export class AurumDBIterator<T> {
     private iterator: any;
     public current: { key: string; value: T };
@@ -6,9 +8,15 @@ export class AurumDBIterator<T> {
         this.iterator = iterator;
     }
 
+    public async *asGenerator(): AsyncGenerator<{ key: string; value: T }> {
+        while (await this.next()) {
+            yield this.current;
+        }
+    }
+
     public next(): Promise<{ key: string; value: T }> {
         return new Promise<{ key: string; value: T }>((resolve, reject) => {
-            this.iterator.next((err, key, value) => {
+            function cb(err: any, key: string, value: T) {
                 if (err) {
                     this.end();
                     reject(err);
@@ -19,11 +27,16 @@ export class AurumDBIterator<T> {
                     if (!key) {
                         this.current = undefined;
                     } else {
-                        this.current = { key, value };
+                        if (key === META_KEY) {
+                            return this.iterator.next(cb.bind(this));
+                        } else {
+                            this.current = { key, value };
+                        }
                     }
                     resolve(this.current);
                 }
-            });
+            }
+            this.iterator.next(cb.bind(this));
         });
     }
 
